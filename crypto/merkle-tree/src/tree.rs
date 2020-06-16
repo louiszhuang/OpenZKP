@@ -1,4 +1,5 @@
 use crate::{Commitment, Error, Index, Node, Proof, Result, VectorCommitment};
+use log::{info, trace};
 use std::collections::VecDeque;
 use zkp_error_utils::require;
 use zkp_hash::{Hash, Hashable};
@@ -55,6 +56,12 @@ impl<Container: VectorCommitment> Tree<Container> {
     }
 
     pub fn from_leaves_skip_layers(leaves: Container, skip_layers: usize) -> Result<Self> {
+        info!(
+            "Computing Merkle tree of size {} ({} skip layer)",
+            leaves.len(),
+            skip_layers
+        );
+        trace!("BEGIN Merkle Tree");
         let size = leaves.len();
         if size == 0 {
             return Ok(Self {
@@ -113,6 +120,7 @@ impl<Container: VectorCommitment> Tree<Container> {
             nodes[0].clone()
         };
         let commitment = Commitment::from_size_hash(size, &root_hash).unwrap();
+        trace!("END Merkle Tree");
         Ok(Self {
             commitment,
             nodes,
@@ -190,7 +198,7 @@ impl<Container: VectorCommitment> Tree<Container> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quickcheck_macros::quickcheck;
+    use proptest::prelude::*;
     use zkp_macros_decl::hex;
     use zkp_u256::U256;
 
@@ -263,28 +271,30 @@ mod tests {
         proof.verify(&select_leaves).unwrap();
     }
 
-    #[quickcheck]
-    fn test_merkle_tree(depth: usize, skip: usize, indices: Vec<usize>, seed: U256) {
-        // We want tests up to depth 8; adjust the input
-        let depth = depth % 9;
-        // We want to skip up to 3 layers; adjust the input
-        let skip = skip % 4;
-        let num_leaves = 1_usize << depth;
-        let indices: Vec<_> = indices.iter().map(|&i| i % num_leaves).collect();
-        let leaves: Vec<_> = (0..num_leaves)
-            .map(|i| (&seed + U256::from(i)).pow(3).unwrap())
-            .collect();
+    proptest!(
+        #[test]
+        fn test_merkle_tree(depth: usize, skip: usize, indices: Vec<usize>, seed: usize) {
+            // We want tests up to depth 8; adjust the input
+            let depth = depth % 9;
+            // We want to skip up to 3 layers; adjust the input
+            let skip = skip % 4;
+            let num_leaves = 1_usize << depth;
+            let indices: Vec<_> = indices.iter().map(|&i| i % num_leaves).collect();
+            let leaves: Vec<_> = (0..num_leaves)
+                .map(|i| U256::from(seed + i.pow(3)))
+                .collect();
 
-        // Build the tree
-        let tree = Tree::from_leaves_skip_layers(leaves, skip).unwrap();
-        let root = tree.commitment();
+            // Build the tree
+            let tree = Tree::from_leaves_skip_layers(leaves, skip).unwrap();
+            let root = tree.commitment();
 
-        // Open indices
-        let proof = tree.open(&indices).unwrap();
-        assert_eq!(root.proof_size(&indices).unwrap(), proof.hashes().len());
+            // Open indices
+            let proof = tree.open(&indices).unwrap();
+            prop_assert_eq!(root.proof_size(&indices).unwrap(), proof.hashes().len());
 
-        // Verify proof
-        let select_leaves: Vec<_> = indices.iter().map(|&i| (i, tree.leaf(i))).collect();
-        proof.verify(&select_leaves).unwrap();
-    }
+            // Verify proof
+            let select_leaves: Vec<_> = indices.iter().map(|&i| (i, tree.leaf(i))).collect();
+            prop_assert!(proof.verify(&select_leaves).is_ok());
+        }
+    );
 }

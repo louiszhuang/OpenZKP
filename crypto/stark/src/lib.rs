@@ -38,6 +38,10 @@
 #![cfg_attr(feature = "std", warn(missing_debug_implementations,))]
 // rand_xoshiro v0.4.0 is required for a zkp-stark example and v0.3.1 for criterion
 #![allow(clippy::multiple_crate_versions)]
+// TODO: Toggle based on stable/nightly
+#![allow(clippy::missing_errors_doc)]
+// TODO: Add `must_use` attributes
+#![allow(clippy::must_use_candidate)]
 
 mod channel;
 mod constraints;
@@ -45,6 +49,10 @@ mod polynomial;
 mod proof;
 mod proof_of_work;
 mod rational_expression;
+#[cfg(feature = "std")]
+mod solidity_seralizer;
+#[cfg(feature = "std")]
+mod solidity_verifier;
 mod traits;
 mod verifier;
 
@@ -53,14 +61,15 @@ mod verifier;
 #[cfg(feature = "prover")]
 mod algebraic_dag;
 #[cfg(feature = "prover")]
-mod component;
+pub mod component;
 #[cfg(feature = "prover")]
 mod constraint_check;
 #[cfg(feature = "prover")]
 mod prover;
 #[cfg(feature = "prover")]
+mod rational_equality;
+#[cfg(feature = "prover")]
 mod trace_table;
-
 // TODO: Have unconditional Debug trait on all types
 
 // In no std mode, substitute no_std_compat
@@ -79,12 +88,13 @@ pub use rational_expression::RationalExpression;
 pub use traits::Verifiable;
 pub use verifier::{verify, Error as VerifierError};
 
+// We want std for this so that we can use hex encode
+#[cfg(feature = "std")]
+pub use solidity_seralizer::proof_serialize;
+#[cfg(feature = "std")]
+pub use solidity_verifier::generate;
+
 // Exports for prover
-#[cfg(feature = "prover")]
-pub use component::{
-    compose_folded, compose_horizontal, compose_vertical, fold, fold_many, permute_columns, shift,
-    Component,
-};
 #[cfg(feature = "prover")]
 pub use constraint_check::check_constraints;
 #[cfg(feature = "prover")]

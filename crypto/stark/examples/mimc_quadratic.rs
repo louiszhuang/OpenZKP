@@ -1,5 +1,6 @@
+use std::time::Instant;
 use zkp_macros_decl::field_element;
-use zkp_primefield::{fft::ifft, FieldElement};
+use zkp_primefield::{fft::permute, Fft, FieldElement, Pow, Root, SquareInline};
 use zkp_stark::{
     Constraints, DensePolynomial, Provable, RationalExpression, TraceTable, Verifiable,
 };
@@ -47,7 +48,7 @@ impl Verifiable for Claim {
         let trace_generator = FieldElement::root(trace_length).unwrap();
         let g = Constant(trace_generator);
         let on_row = |index| (X - g.pow(index)).inv();
-        let every_row = || (X - g.pow(trace_length - 1)) / (X.pow(trace_length) - 1.into());
+        let every_row = || (X - g.pow(trace_length - 1)) / (X.pow(trace_length) - 1);
 
         let periodic = |coefficients| {
             Polynomial(
@@ -55,7 +56,10 @@ impl Verifiable for Claim {
                 Box::new(X.pow(trace_length / 16)),
             )
         };
-        let k_coef = periodic(&ifft(&K_COEF.to_vec()));
+        let mut k_coef = K_COEF.to_vec();
+        k_coef.ifft();
+        permute(&mut k_coef);
+        let k_coef = periodic(&k_coef);
 
         Constraints::from_expressions((trace_length, 3), seed, vec![
             // Says x_1 = x_0^2
@@ -63,11 +67,11 @@ impl Verifiable for Claim {
             // Says x_2 = x_1*x_0
             (Trace(0, 0) * Trace(1, 0) - Trace(2, 0)) * every_row(),
             // Says next row's x_0 = prev row x_2 + k_this row
-            (Trace(0, 1) - (Trace(2, 0) + k_coef.clone())) * every_row(),
+            (Trace(0, 1) - (Trace(2, 0) + k_coef)) * every_row(),
             // Says the first x_0 is the before
-            (Trace(0, 0) - (&self.before).into()) * on_row(0),
+            (Trace(0, 0) - &self.before) * on_row(0),
             // Says the the x_0 on row ROUNDS
-            (Trace(0, 0) - (&self.after).into()) * on_row(trace_length - 1),
+            (Trace(0, 0) - &self.after) * on_row(trace_length - 1),
         ])
         .unwrap()
     }
@@ -92,7 +96,7 @@ impl Provable<()> for Claim {
 fn mimc(start: &FieldElement) -> FieldElement {
     let mut prev = start.clone();
     for i in 1..ROUNDS {
-        prev = prev.pow(3) + &K_COEF[(i - 1) % 16];
+        prev = prev.pow(3_usize) + &K_COEF[(i - 1) % 16];
     }
     prev
 }
@@ -100,8 +104,12 @@ fn mimc(start: &FieldElement) -> FieldElement {
 fn main() {
     let before = field_element!("00a74f2a70da4ea3723cabd2acc55d03f9ff6d0e7acef0fc63263b12c10dd837");
     let after = mimc(&before);
+    let start = Instant::now();
     let claim = Claim { before, after };
     assert_eq!(claim.check(()), Ok(()));
     let proof = claim.prove(()).unwrap();
+    let duration = start.elapsed();
+    println!("Time elapsed in proof function is: {:?}", duration);
+    println!("The proof length is {}", proof.as_bytes().len());
     claim.verify(&proof).unwrap();
 }

@@ -6,16 +6,16 @@ use crate::{
     proof_of_work, verify, Proof, TraceTable, VerifierError,
 };
 use itertools::Itertools;
-use log::info;
+use log::{info, trace};
 use rayon::prelude::*;
 use std::{fmt, prelude::v1::*, vec};
 use zkp_hash::{Hash, Hashable, MaskedKeccak};
 use zkp_merkle_tree::{Error as MerkleError, Tree, VectorCommitment};
 use zkp_mmap_vec::MmapVec;
 use zkp_primefield::{
-    fft::{ifft_permuted, permute, permute_index},
+    fft::{permute, permute_index},
     geometric_series::geometric_series,
-    FieldElement,
+    Fft, FieldElement, Inv, One, Pow, Root, SquareInline, Zero,
 };
 use zkp_u256::U256;
 
@@ -345,6 +345,10 @@ impl VectorCommitment for FriLeaves {
 // TODO: Split up
 #[allow(clippy::too_many_lines)]
 pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
+    // This hack allows us to avoid changing the interface to mut for the
+    // claim polynomials but is ugly and should be removed.
+    let original_constraints = constraints.clone();
+    let mut constraints = constraints.clone();
     // TODO: Verify input
     //  * Constraint trace length matches trace table length
     //  * Fri layout is less than trace length * blowup
@@ -352,7 +356,7 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     //  * Trace table satisfies constraints (expensive check, should be optional)
 
     info!("Starting Stark proof.");
-    info!("Proof constraints: {:?}", constraints);
+    trace!("BEGIN Stark proof");
     // TODO: Use a proper size human formating function
     #[allow(clippy::cast_precision_loss)]
     let size_mb = (trace.num_rows() * trace.num_columns() * 32) as f64 / 1_000_000_f64;
@@ -365,10 +369,11 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("{} constraints", constraints.len(),);
 
     info!("Initialize channel with claim.");
-    let mut proof = ProverChannel::new();
+    let mut proof = ProverChannel::default();
     proof.initialize(constraints.channel_seed());
 
     // 1. Trace commitment.
+    trace!("BEGIN Trace commitment");
 
     // Compute the low degree extension of the trace table.
     info!("Compute the low degree extension of the trace table.");
@@ -382,7 +387,7 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     );
     let trace_lde = PolyLDE(
         trace_polynomials
-            .par_iter()
+            .iter()
             .map(|p| p.low_degree_extension(constraints.blowup))
             .collect::<Vec<_>>(),
     );
@@ -392,8 +397,10 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("Construct a merkle tree over the LDE trace and write the root to the channel.");
     let (commitment, tree) = trace_lde.commit()?;
     proof.write(&commitment);
+    trace!("END Trace commitment");
 
     // 2. Constraint commitment
+    trace!("BEGIN Constraint commitment");
 
     // Read constraint coefficients from the channel.
     info!("Read constraint coefficients from the channel.");
@@ -402,7 +409,7 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("Compute constraint polynomials.");
     let constraint_polynomials = get_constraint_polynomials(
         &tree.leaves(),
-        &constraints,
+        &mut constraints,
         &constraint_coefficients,
         trace.num_rows(),
     );
@@ -419,7 +426,7 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("Compute the low degree extension of constraint polynomials.");
     let constraint_lde = PolyLDE(
         constraint_polynomials
-            .par_iter()
+            .iter()
             .map(|p| p.low_degree_extension(constraints.blowup))
             .collect::<Vec<_>>(),
     );
@@ -428,19 +435,23 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("Compute the merkle tree over the LDE constraint polynomials.");
     let (commitment, c_tree) = constraint_lde.commit()?;
     proof.write(&commitment);
+    trace!("END Constraint commitment");
 
     // 3. Out of domain sampling
     info!("Divide out OODS point and combine polynomials.");
+    trace!("BEGIN Out of domain sampling");
     let oods_polynomial = oods_combine(
         &mut proof,
         &trace_polynomials,
         &constraints.trace_arguments(),
         &constraint_polynomials,
     );
+    trace!("END Out of domain sampling");
     info!("Oods poly degree: {}", oods_polynomial.degree());
 
     // 4. FRI layers with trees
     info!("LDE extension of final polynomial.");
+    trace!("BEGIN FRI commitment");
     let first_fri_layer = oods_polynomial.low_degree_extension(constraints.blowup);
     info!("Fri layers.");
     let fri_trees = perform_fri_layering(
@@ -449,6 +460,7 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
         &constraints.fri_layout,
         constraints.blowup,
     )?;
+    trace!("END FRI commitment");
 
     // 5. Proof of work
     info!("Proof of work.");
@@ -493,23 +505,26 @@ pub fn prove(constraints: &Constraints, trace: &TraceTable) -> Result<Proof> {
     info!("Verify proof.");
     // TODO: Rename channel / transcript object
     let proof = Proof::from_bytes(proof.proof);
-    verify(constraints, &proof)?;
+    verify(&original_constraints, &proof)?;
+
+    trace!("END Stark proof");
     Ok(proof)
 }
 
+// Constructs a trace table on a coset domain of `size`.
 fn extract_trace_coset(trace_lde: &PolyLDE, size: usize) -> TraceTable {
     let trace_lde: &[MmapVec<FieldElement>] = &trace_lde.0;
     let lde_size = trace_lde[0].len();
     let mut trace_coset = TraceTable::new(size, trace_lde.len());
-    // OPT: Benchmark with flipped order of loops
+    trace!("BEGIN Extract Trace Coset");
     for i in 0..trace_coset.num_rows() {
-        for j in 0..trace_coset.num_columns() {
-            let lde = &trace_lde[j];
-            let index = i * lde_size / size;
-            let index = permute_index(lde.len(), index);
+        let index = i * lde_size / size;
+        let index = permute_index(lde_size, index);
+        for (j, lde) in trace_lde.iter().enumerate() {
             trace_coset[(i, j)] = lde[index].clone();
         }
     }
+    trace!("END Extract Trace Coset");
     trace_coset
 }
 
@@ -530,7 +545,7 @@ fn get_indices(num: usize, bits: u32, proof: &mut ProverChannel) -> Vec<usize> {
 
 fn get_constraint_polynomials(
     trace_lde: &PolyLDE,
-    constraints: &Constraints,
+    constraints: &mut Constraints,
     constraint_coefficients: &[FieldElement],
     trace_length: usize,
 ) -> Vec<DensePolynomial> {
@@ -539,6 +554,7 @@ fn get_constraint_polynomials(
     // independently. This will make all periods and therefore lookup tables
     // smaller.
     const CHUNK_SIZE: usize = 65536;
+    trace!("BEGIN Compute constraint polynomials");
 
     // We need to evaluate on a power of two degree
     let constraint_degree = constraints.degree();
@@ -549,22 +565,40 @@ fn get_constraint_polynomials(
     let trace_coset = extract_trace_coset(trace_lde, coset_size);
 
     info!("Combine rational expressions");
-    let combined_constraints = constraints.combine(constraint_coefficients);
+    let mut combined_constraints = constraints.combine(constraint_coefficients);
+    // At this point the constraint's have had degrees assigned which
+    // match those where the claim polynomials aren't specified.
+    // TODO - This substitution lowers overall security and should be validated.
+    // Note that this is because by fully adjusting the degree of the constraint
+    // up the max degree we give an attacker the ability to commit to a
+    // higher degree polynomial reducing security.
+    // TODO - Of particular concern is that by manipulating the degree of the
+    // claimed interpolating polynomial of the modifications modifications can
+    // unchecked in the proof.
+    combined_constraints = combined_constraints.substitute_claim(&constraints.claim_polynomials);
+    constraints.substitute();
+
     let mut dag = AlgebraicGraph::new(
-        &FieldElement::GENERATOR,
+        &FieldElement::generator(),
         trace_coset.num_rows(),
         eval_degree,
     );
+    trace!("Convert to DAG");
     let result = dag.expression(combined_constraints);
+
+    trace!("Compute lookup tables");
     dag.lookup_tables();
+
+    trace!("Tree-shake DAG");
     // TODO: Track and use result reference.
     let _ = dag.tree_shake(result);
     dag.init(0);
 
     // Evaluate on the coset trace table
-    info!("Evaluate on the coset trace table");
+    info!("Evaluate DAG on the coset trace table");
+    trace!("BEGIN Evaluate");
     let mut result: MmapVec<FieldElement> = MmapVec::with_capacity(coset_size);
-    result.resize(coset_size, FieldElement::ZERO);
+    result.resize(coset_size, FieldElement::zero());
     let values = &mut result;
     values
         .par_chunks_mut(CHUNK_SIZE)
@@ -578,13 +612,20 @@ fn get_constraint_polynomials(
                 i += 1;
             }
         });
+    trace!("END Evaluate");
 
     info!("Convert from values to coefficients");
-    ifft_permuted(values);
+    // TODO: Re-use interpolation function form TraceTable
+    trace!("BEGIN Interpolate");
+    values.ifft();
     permute(values);
+    trace!("END Interpolate");
     // OPT: Merge with even-odd separation loop.
-    for (f, y) in geometric_series(&FieldElement::ONE, &FieldElement::GENERATOR.inv().unwrap())
-        .zip(values.iter_mut())
+    for (f, y) in geometric_series(
+        &FieldElement::one(),
+        &FieldElement::generator().inv().unwrap(),
+    )
+    .zip(values.iter_mut())
     {
         // Shift out the generator from the evaluation domain.
         *y *= &f;
@@ -594,16 +635,18 @@ fn get_constraint_polynomials(
     let mut constraint_polynomials: Vec<MmapVec<FieldElement>> =
         vec![MmapVec::with_capacity(trace_length); eval_degree];
     let (coefficients, zeros) = values.split_at(eval_degree * trace_length);
-    assert!(zeros.iter().all(|z| z == &FieldElement::ZERO));
+    assert!(zeros.iter().all(|z| z == &FieldElement::zero()));
     for chunk in coefficients.chunks_exact(eval_degree) {
         for (i, coefficient) in chunk.iter().enumerate() {
             constraint_polynomials[i].push(coefficient.clone());
         }
     }
-    constraint_polynomials
+    let result = constraint_polynomials
         .into_iter()
         .map(DensePolynomial::from_mmap_vec)
-        .collect()
+        .collect();
+    trace!("END Compute constraint polynomials");
+    result
 }
 
 fn oods_combine(
@@ -615,18 +658,25 @@ fn oods_combine(
     // Fetch the oods sampling point
     let trace_length = trace_polynomials[0].len();
     let oods_point: FieldElement = proof.get_random();
+    dbg!(oods_point.clone());
     let g = FieldElement::root(trace_length).expect("No root for trace polynomial length.");
 
     // Write point evaluations to proof
     // OPT: Parallelization
     for (column, offset) in trace_arguments {
-        proof.write(&trace_polynomials[*column].evaluate(&(&oods_point * &g.pow(*offset))));
+        proof
+            .write(&trace_polynomials[*column].evaluate(&(&oods_point * &g.pow(*offset).unwrap())));
     }
 
     let oods_point_pow = oods_point.pow(constraint_polynomials.len());
-    for constraint_polynomial in constraint_polynomials {
-        proof.write(&constraint_polynomial.evaluate(&oods_point_pow));
+    let mut oods_value = FieldElement::zero();
+    for (i, constraint_polynomial) in constraint_polynomials.iter().enumerate() {
+        let value = constraint_polynomial.evaluate(&oods_point_pow);
+        proof.write(&value);
+        // dbg!(oods_value);
+        oods_value += oods_point.pow(i) * value;
     }
+    dbg!(oods_value);
 
     // Divide out points and linear sum the polynomials
     // OPT: Parallelization
@@ -636,7 +686,7 @@ fn oods_combine(
     let mut combined_polynomial = DensePolynomial::zeros(trace_length);
     for ((column, offset), coefficient) in trace_arguments.iter().zip(&trace_coefficients) {
         trace_polynomials[*column].divide_out_point_into(
-            &(&oods_point * &g.pow(*offset)),
+            &(&oods_point * g.pow(*offset).unwrap()),
             coefficient,
             &mut combined_polynomial,
         );
@@ -675,7 +725,7 @@ fn perform_fri_layering(
             .inv()
             .unwrap();
         let mut x_inv = MmapVec::with_capacity(n / 2);
-        let mut accumulator = FieldElement::ONE;
+        let mut accumulator = FieldElement::one();
         for _ in 0..n / 2 {
             x_inv.push(accumulator.clone());
             accumulator *= &root_inv;
@@ -719,7 +769,7 @@ fn perform_fri_layering(
                 )
             }
             2 => {
-                let coefficient_2 = coefficient.pow(2);
+                let coefficient_2 = coefficient.square();
                 next_layer.extend(
                     layer
                         .tuples()
@@ -775,7 +825,7 @@ fn perform_fri_layering(
     let n_coefficients = next_layer.len() / blowup;
     let points = &mut next_layer[0..n_coefficients];
     permute(points);
-    ifft_permuted(points);
+    points.ifft();
     permute(points);
     proof.write(&*points);
 
@@ -818,7 +868,7 @@ fn decommit_fri_layers_and_trees(
 mod tests {
     use super::*;
     use crate::{traits::tests::Recurrance, verify, Provable, Verifiable};
-    use tiny_keccak::sha3_256;
+    use tiny_keccak::{Hasher, Sha3};
     use zkp_macros_decl::{field_element, hex, u256h};
     use zkp_primefield::{fft::permute_index, geometric_series::geometric_series};
     use zkp_u256::U256;
@@ -866,6 +916,7 @@ mod tests {
 
     #[test]
     fn fib_test_1024_python_witness() {
+        crate::tests::init();
         let recurrance = Recurrance {
             index:         1000,
             initial_value: field_element!("cafebabe"),
@@ -881,8 +932,13 @@ mod tests {
         constraints.num_queries = 20;
         constraints.fri_layout = vec![3, 2];
         let proof = prove(&constraints, &trace).unwrap();
+
+        let mut output = [0; 32];
+        let mut sha3 = Sha3::v256();
+        sha3.update(proof.as_bytes());
+        sha3.finalize(&mut output);
         assert_eq!(
-            sha3_256(proof.as_bytes()),
+            output,
             hex!("4e8896267a9649230ebb1ffbdc5c6e6a088a80a06073565e36437a5738745107")
         )
     }
@@ -938,7 +994,7 @@ mod tests {
             field_element!("0393a32b34832dbad650df250f673d7c5edd09f076fc314a3e5a42f0606082e1");
         let g = field_element!("0659d83946a03edd72406af6711825f5653d9e35dc125289a206c054ec89c4f1");
         let eval_domain_size = trace_len * constraints.blowup;
-        let gen = FieldElement::GENERATOR;
+        let gen = FieldElement::generator();
 
         // Second check that the trace table function is working.
         let trace = claim.trace(&witness);
@@ -949,10 +1005,10 @@ mod tests {
 
         let TPn = trace.interpolate();
         // Checks that the trace table polynomial interpolation is working
-        assert_eq!(TPn[0].evaluate(&g.pow(1000)), trace[(1000, 0)]);
+        assert_eq!(TPn[0].evaluate(&g.pow(1000_usize)), trace[(1000, 0)]);
 
         let LDEn = PolyLDE(
-            TPn.par_iter()
+            TPn.iter()
                 .map(|p| p.low_degree_extension(constraints.blowup))
                 .collect::<Vec<_>>(),
         );
@@ -984,7 +1040,7 @@ mod tests {
             hex!("018dc61f748b1a6c440827876f30f63cb6c4c188000000000000000000000000")
         );
 
-        let mut proof = ProverChannel::new();
+        let mut proof = ProverChannel::default();
         proof.initialize(&claim.seed());
         // Checks that the channel is inited properly
         assert_eq!(
@@ -1013,7 +1069,7 @@ mod tests {
 
         let constraint_polynomials = get_constraint_polynomials(
             &tree.leaves(),
-            &constraints,
+            &mut constraints,
             &constraint_coefficients,
             trace.num_rows(),
         );
@@ -1021,7 +1077,7 @@ mod tests {
         assert_eq!(constraint_polynomials[0].len(), 1024);
         let CC = PolyLDE(
             constraint_polynomials
-                .par_iter()
+                .iter()
                 .map(|p| p.low_degree_extension(constraints.blowup))
                 .collect::<Vec<_>>(),
         );
@@ -1052,7 +1108,7 @@ mod tests {
         // Checks that our out of domain evaluated constraints calculated right
         let trace_generator = FieldElement::root(eval_domain_size).unwrap();
         assert_eq!(
-            CO.evaluate(&(FieldElement::GENERATOR * trace_generator.pow(4321))),
+            CO.evaluate(&(FieldElement::generator() * trace_generator.pow(4321_usize))),
             field_element!("03c6b730c58b55f44bbf3cb7ea82b2e6a0a8b23558e908b5466dfe42e821ee96")
         );
 

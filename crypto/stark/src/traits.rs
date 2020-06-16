@@ -43,10 +43,10 @@ pub trait Provable<T>: Verifiable {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::RationalExpression;
-    use quickcheck::{Arbitrary, Gen};
+    use crate::{polynomial::DensePolynomial, RationalExpression};
+    use proptest::{collection::vec as prop_vec, prelude::*};
     use std::convert::TryInto;
-    use zkp_primefield::FieldElement;
+    use zkp_primefield::{FieldElement, One, Pow, Root, Zero};
 
     // False positives on the Latex math.
     #[allow(clippy::doc_markdown)]
@@ -62,9 +62,9 @@ pub(crate) mod tests {
 
     #[derive(Clone, PartialEq, Debug)]
     pub(crate) struct Claim {
-        index:    usize,
-        value:    FieldElement,
-        exponent: usize,
+        index:            usize,
+        pub(crate) value: FieldElement,
+        exponent:         usize,
     }
 
     #[derive(Clone, PartialEq, Debug)]
@@ -88,7 +88,7 @@ pub(crate) mod tests {
         }
 
         fn index_value(&self) -> FieldElement {
-            let mut state = (FieldElement::ONE, self.initial_value.clone());
+            let mut state = (FieldElement::one(), self.initial_value.clone());
             for _ in 0..self.index {
                 state = (state.1.pow(self.exponent), state.0 + state.1);
             }
@@ -108,17 +108,6 @@ pub(crate) mod tests {
         }
     }
 
-    impl Arbitrary for Recurrance {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            Self {
-                // TODO: handle 1 row trace tables.
-                index:         1 + usize::arbitrary(g),
-                initial_value: FieldElement::arbitrary(g),
-                exponent:      1 + usize::arbitrary(g) % 16,
-            }
-        }
-    }
-
     impl Verifiable for Claim {
         fn constraints(&self) -> Constraints {
             use RationalExpression::*;
@@ -128,14 +117,14 @@ pub(crate) mod tests {
             let trace_generator = FieldElement::root(trace_length).unwrap();
             let g = Constant(trace_generator);
             let on_row = |index| (X - g.pow(index)).inv();
-            let every_row = || (X - g.pow(trace_length - 1)) / (X.pow(trace_length) - 1.into());
+            let every_row = || (X - g.pow(trace_length - 1)) / (X.pow(trace_length) - 1);
 
             // Constraints
             Constraints::from_expressions((trace_length, 2), self.seed(), vec![
                 (Trace(0, 1) - Trace(1, 0).pow(self.exponent)) * every_row(),
                 (Trace(1, 1) - Trace(0, 0) - Trace(1, 0)) * every_row(),
-                (Trace(0, 0) - 1.into()) * on_row(trace_length),
-                (Trace(0, 0) - (&self.value).into()) * on_row(self.index),
+                (Trace(0, 0) - 1) * on_row(trace_length),
+                (Trace(0, 0) - &self.value) * on_row(self.index),
             ])
             .unwrap()
         }
@@ -193,13 +182,13 @@ pub(crate) mod tests {
         }
 
         fn index_value(&self) -> FieldElement {
-            let mut values = vec![FieldElement::ZERO; self.index];
+            let mut values = vec![FieldElement::zero(); self.index];
             for (i, initial_value) in self.initial_values.iter().enumerate() {
                 values[i] = initial_value.clone();
             }
             let order = self.initial_values.len();
             for i in order..self.index {
-                let mut next_value = FieldElement::ZERO;
+                let mut next_value = FieldElement::zero();
                 for ((value, coefficient), &exponent) in values[i - order..]
                     .iter()
                     .zip(&self.coefficients)
@@ -230,21 +219,9 @@ pub(crate) mod tests {
         fn trace_length(&self) -> usize {
             (self.index + 1).next_power_of_two()
         }
-    }
 
-    impl Arbitrary for Recurrance2 {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            let order = 1 + usize::arbitrary(g) % 12;
-            let initial_values = (0..order).map(|_| FieldElement::arbitrary(g)).collect();
-            let exponents = (0..order).map(|_| usize::arbitrary(g) % 16).collect();
-            let coefficients = (0..order).map(|_| FieldElement::arbitrary(g)).collect();
-
-            Self {
-                index: order + usize::arbitrary(g) % 1000,
-                initial_values,
-                exponents,
-                coefficients,
-            }
+        fn claim_polynomials(&self) -> Vec<DensePolynomial> {
+            vec![DensePolynomial::new(&[self.value.clone()])]
         }
     }
 
@@ -259,24 +236,30 @@ pub(crate) mod tests {
 
             let on_row = |index| (X - trace_generator.pow(index)).inv();
 
-            let mut constraints: Vec<RationalExpression> =
-                vec![(Trace(0, 0) - (&self.value).into()) * on_row(self.index - 1)];
+            let mut constraints: Vec<RationalExpression> = vec![
+                (Trace(0, 0) - ClaimPolynomial(0, 0, Box::new(X), None)) * on_row(self.index - 1),
+            ];
 
-            let mut recurrance_constraint = Constant(FieldElement::ZERO);
+            let mut recurrance_constraint = Constant(FieldElement::zero());
             for (i, (coefficient, exponent)) in
                 self.coefficients.iter().zip(&self.exponents).enumerate()
             {
                 recurrance_constraint = recurrance_constraint
-                    + Trace(0, i.try_into().unwrap()).pow(*exponent) * coefficient.into();
+                    + Trace(0, i.try_into().unwrap()).pow(*exponent) * coefficient;
             }
             recurrance_constraint =
                 recurrance_constraint - Trace(0, self.coefficients.len().try_into().unwrap());
-            recurrance_constraint = recurrance_constraint / (X.pow(trace_length) - 1.into());
+            recurrance_constraint = recurrance_constraint / (X.pow(trace_length) - 1);
             for i in 0..self.coefficients.len() {
                 recurrance_constraint =
                     recurrance_constraint * (X - trace_generator.pow(i + 1).inv());
             }
             constraints.push(recurrance_constraint);
+            let claim_polynomials = self.claim_polynomials();
+            constraints = constraints
+                .iter()
+                .map(|c| c.substitute_claim(&claim_polynomials))
+                .collect();
 
             Constraints::from_expressions((trace_length, 1), self.seed(), constraints).unwrap()
         }
@@ -291,7 +274,7 @@ pub(crate) mod tests {
             }
             let order = witness.initial_values.len();
             for i in order..self.trace_length() {
-                let mut next_value = FieldElement::ZERO;
+                let mut next_value = FieldElement::zero();
                 for (j, (coefficient, &exponent)) in
                     self.coefficients.iter().zip(&self.exponents).enumerate()
                 {
@@ -300,6 +283,50 @@ pub(crate) mod tests {
                 trace_table[(i, 0)] = next_value;
             }
             trace_table
+        }
+    }
+
+    impl Arbitrary for Recurrance {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        // TODO: handle 1 row trace tables.
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            <(usize, FieldElement, usize)>::arbitrary()
+                .prop_map(|(a, initial_value, b)| {
+                    Self {
+                        index: 1 + a % 10,
+                        initial_value,
+                        exponent: b % 6,
+                    }
+                })
+                .boxed()
+        }
+    }
+
+    impl Arbitrary for Recurrance2 {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            (1_usize..=12)
+                .prop_flat_map(|order| {
+                    (
+                        (order..order + 10),
+                        prop_vec(FieldElement::arbitrary(), order),
+                        prop_vec(0_usize..6, order),
+                        prop_vec(FieldElement::arbitrary(), order),
+                    )
+                })
+                .prop_map(|(index, initial_values, exponents, coefficients)| {
+                    Self {
+                        index,
+                        initial_values,
+                        exponents,
+                        coefficients,
+                    }
+                })
+                .boxed()
         }
     }
 }

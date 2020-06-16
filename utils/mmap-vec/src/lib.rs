@@ -3,7 +3,7 @@
 // For clippy lints see: https://rust-lang.github.io/rust-clippy/master
 // For rustc lints see: https://doc.rust-lang.org/rustc/lints/index.html
 #![cfg_attr(not(feature = "std"), no_std)]
-// #![forbid(unsafe_code)] // We need unsafe in this package
+#![forbid(unsafe_code)]
 #![warn(
     // Enable sets of warnings
     clippy::all,
@@ -38,6 +38,8 @@
 #![cfg_attr(feature = "std", warn(missing_debug_implementations,))]
 // rand_xoshiro v0.4.0 is required for a zkp-stark example and v0.3.1 for criterion
 #![allow(clippy::multiple_crate_versions)]
+// TODO: Add `must_use` where relevant
+#![allow(clippy::must_use_candidate)]
 
 #[cfg(feature = "std")]
 mod mmap_vec;

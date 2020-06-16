@@ -1,14 +1,15 @@
 use crate::{
-    component::pedersen_merkle,
+    component::MerkleTree,
     inputs::{Claim, Witness},
 };
-use log::info;
+use log::{info, trace};
 use zkp_macros_decl::{field_element, hex};
 use zkp_primefield::FieldElement;
-use zkp_stark::{prove, Constraints};
+use zkp_stark::{component::Component, prove, Constraints};
 use zkp_u256::U256;
 
-pub fn starkware_example() {
+pub(crate) fn starkware_example() {
+    trace!("BEGIN Pedersen-Merkle Starkware Example");
     info!("Constructing claim");
     let claim = STARKWARE_CLAIM;
     info!("Claim: {:?}", claim);
@@ -17,29 +18,35 @@ pub fn starkware_example() {
     let witness = starkware_witness();
 
     info!("Verifying claim and witness...");
-    claim.verify(&witness);
+    let recomputed = Witness::new(witness.leaf.clone(), witness.path.clone());
+    assert_eq!(witness.root, recomputed.root);
 
     info!("Constructing component...");
-    let component = pedersen_merkle(&claim, &witness);
-    info!(
-        "Constructed {:?}x{:?} trace",
-        component.trace.num_rows(),
-        component.trace.num_columns()
-    );
-    info!("Constructed {:?} constraints", component.constraints.len());
+    let component = MerkleTree::new(witness.path.len());
+    let polynomials = component.num_polynomials();
+    let size = component.polynomial_size();
+    info!("Component has {:?} trace", (polynomials, size));
 
-    info!("Constructing proof...");
-    let mut constraints = Constraints::from_expressions(
-        (component.trace.num_rows(), component.trace.num_columns()),
-        (&claim).into(),
-        component.constraints,
-    )
-    .expect("Could not create Constraint object");
+    info!("Constructing constraints...");
+    let constraints = component.constraints(&claim);
+    info!("Constructed {:?} constraints", constraints.len());
+
+    info!("Constructing {:?} trace", (polynomials, size));
+    trace!("BEGIN Generate trace");
+    let trace = component.trace_table(&witness);
+    trace!("END Generate trace");
+
+    info!("Constructing proof parameters...");
+    let mut constraints =
+        Constraints::from_expressions((size, polynomials), (&claim).into(), constraints)
+            .expect("Could not create Constraint object");
     constraints.blowup = 16;
     constraints.pow_bits = 28;
     constraints.num_queries = 13;
     constraints.fri_layout = vec![3, 3, 3, 3, 2];
-    let proof = prove(&constraints, &component.trace).unwrap();
+
+    info!("Constructing proofs...");
+    let proof = prove(&constraints, &trace).unwrap();
 
     info!("Spot checking proof...");
     assert_eq!(
@@ -72,18 +79,24 @@ pub fn starkware_example() {
         proof.as_bytes()[768..800],
         hex!("8af79c56d74b9252c3c542fc2b56d4692c608c98000000000000000000000000")
     );
+    trace!("END Pedersen-Merkle Starkware Example");
 }
 
-pub const STARKWARE_CLAIM: Claim = Claim {
+pub(crate) const STARKWARE_CLAIM: Claim = Claim {
     path_length: 8192,
     leaf:        field_element!("07232be75984588334afbec4006d672a67977ac7d6114cca9d957370df49a52d"),
     root:        field_element!("0779aed4d3452b88d754ff4eed01b257e63384752782b7efde2e0a9e6eb03423"),
 };
 
-pub fn starkware_witness() -> Witness {
+pub(crate) fn starkware_witness() -> Witness {
     Witness {
-        directions: STARKWARE_DIRECTIONS.to_vec(),
-        path:       STARKWARE_PATH.to_vec(),
+        path: STARKWARE_DIRECTIONS
+            .iter()
+            .copied()
+            .zip(STARKWARE_PATH.iter().cloned())
+            .collect::<Vec<_>>(),
+        leaf: STARKWARE_CLAIM.leaf,
+        root: STARKWARE_CLAIM.root,
     }
 }
 

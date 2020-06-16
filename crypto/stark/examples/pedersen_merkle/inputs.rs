@@ -13,8 +13,34 @@ pub struct Claim {
 #[derive(PartialEq, Clone)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct Witness {
-    pub directions: Vec<bool>,
-    pub path:       Vec<FieldElement>,
+    pub path: Vec<(bool, FieldElement)>,
+    pub leaf: FieldElement,
+    pub root: FieldElement,
+}
+
+impl Witness {
+    pub fn new(leaf: FieldElement, path: Vec<(bool, FieldElement)>) -> Witness {
+        let root = path
+            .iter()
+            .fold(leaf.clone(), |leaf, (direction, sibling)| {
+                if *direction {
+                    merkle_hash(sibling, &leaf)
+                } else {
+                    merkle_hash(&leaf, sibling)
+                }
+            });
+        Witness { leaf, path, root }
+    }
+}
+
+impl From<&Witness> for Claim {
+    fn from(witness: &Witness) -> Self {
+        Claim {
+            path_length: witness.path.len(),
+            leaf:        witness.leaf.clone(),
+            root:        witness.root.clone(),
+        }
+    }
 }
 
 impl From<&Claim> for Vec<u8> {
@@ -27,28 +53,6 @@ impl From<&Claim> for Vec<u8> {
     }
 }
 
-impl Claim {
-    pub fn from_leaf_witness(leaf: FieldElement, witness: &Witness) -> Self {
-        let mut root = leaf.clone();
-        for (direction, sibling) in witness.directions.iter().zip(witness.path.iter()) {
-            root = if *direction {
-                merkle_hash(sibling, &root)
-            } else {
-                merkle_hash(&root, sibling)
-            }
-        }
-        Claim {
-            path_length: witness.path.len(),
-            leaf,
-            root,
-        }
-    }
-
-    pub fn verify(&self, witness: &Witness) {
-        assert_eq!(self, &Claim::from_leaf_witness(self.leaf.clone(), witness));
-    }
-}
-
 #[cfg(test)]
 use zkp_macros_decl::field_element;
 
@@ -56,7 +60,7 @@ use zkp_macros_decl::field_element;
 use zkp_u256::U256;
 
 #[cfg(test)]
-pub const SHORT_CLAIM: Claim = Claim {
+pub(crate) const SHORT_CLAIM: Claim = Claim {
     path_length: 4,
     leaf:        field_element!("00"),
     root:        field_element!("0720d51348b23cb2ca2c3c279ad338b759cbe85aa986f1e3e6e5dad5fff30255"),
@@ -74,11 +78,13 @@ const SHORT_PATH: [FieldElement; 4] = [
 ];
 
 #[cfg(test)]
-pub fn short_witness() -> Witness {
-    Witness {
-        directions: SHORT_DIRECTIONS.to_vec(),
-        path:       SHORT_PATH.to_vec(),
-    }
+pub(crate) fn short_witness() -> Witness {
+    let path = SHORT_DIRECTIONS
+        .iter()
+        .copied()
+        .zip(SHORT_PATH.iter().cloned())
+        .collect::<Vec<_>>();
+    Witness::new(field_element!("00"), path)
 }
 
 #[cfg(test)]

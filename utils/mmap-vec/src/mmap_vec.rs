@@ -8,9 +8,9 @@ use std::{
     mem::size_of,
     ops::{Deref, DerefMut},
     prelude::v1::*,
+    ptr::drop_in_place,
     slice,
 };
-use tempfile::tempfile;
 
 // TODO: Variant of MmapVec where it switched between Vec and Mmap after
 //       a treshold size.
@@ -24,19 +24,15 @@ pub struct MmapVec<T: Clone> {
 }
 
 impl<T: Clone> MmapVec<T> {
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        // From https://docs.rs/tempfile/3.1.0/tempfile/: tempfile() relies on
-        // the OS to remove the temporary file once the last handle is closed.
-        let file = tempfile().expect("cannot create temporary file");
         // TODO: Round up to nearest 4KB
         // Note: mmaped files can not be empty, so we use at leas one byte.
         let size = max(1, capacity * size_of::<T>());
-        if size > 1_000_000 {
-            info!("Allocating {} MB in temp file", size / 1_000_000);
-        }
-        file.set_len(size as u64)
-            .expect("cannot set mmap file length");
-        let mmap = unsafe { MmapOptions::new().len(size).map_mut(&file) }
+        trace!("Allocating {} MB in anonymous mmap", size / 1_000_000);
+        let mmap = MmapOptions::new()
+            .len(size)
+            .map_anon()
             .expect("cannot access memory mapped file");
         Self {
             mmap,
@@ -46,18 +42,26 @@ impl<T: Clone> MmapVec<T> {
         }
     }
 
+    /// # Safety
+    /// This function returns an array of size `len` that is initialized
+    /// with all bits set to zero. This is only safe if all-zeros is a valid
+    /// and safe bit-pattern for type `T`. This is for example the case for
+    /// integer types, but is not safe for types containing references.
     // TODO: Maybe we should do something like a Zeroed trait?
     // See https://github.com/rust-lang/rfcs/issues/2626
+    #[must_use]
     pub unsafe fn zero_initialized(len: usize) -> Self {
         let mut result = Self::with_capacity(len);
         result.length = len;
         result
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.length
     }
@@ -69,6 +73,30 @@ impl<T: Clone> MmapVec<T> {
         let end = self.length;
         self.length += 1;
         self[end] = next;
+    }
+
+    pub fn clear(&mut self) {
+        self.truncate(0)
+    }
+
+    pub fn truncate(&mut self, length: usize) {
+        if length >= self.length {
+            return;
+        }
+        #[allow(unsafe_code)]
+        unsafe {
+            // Modified from std::vec::Vec::truncate, which has this comment:
+            // This is safe because:
+            //
+            // * the slice passed to `drop_in_place` is valid; the `len > self.len` case
+            //   avoids creating an invalid slice, and
+            // * the `len` of the vector is shrunk before calling `drop_in_place`, such that
+            //   no value will be dropped twice in case `drop_in_place` were to panic once
+            //   (if it panics twice, the program aborts).
+            let slice_pointer: *mut [T] = &mut self.as_mut_slice()[length..];
+            self.length = length;
+            drop_in_place(slice_pointer);
+        }
     }
 
     pub fn resize(&mut self, size: usize, fill: T) {
@@ -91,11 +119,13 @@ impl<T: Clone> MmapVec<T> {
     }
 
     #[inline]
+    #[must_use]
     pub fn as_slice(&self) -> &[T] {
         self
     }
 
     #[inline]
+    #[must_use]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
@@ -136,6 +166,9 @@ impl<'a, T: 'a + Clone> Extend<&'a T> for MmapVec<T> {
         }
     }
 }
+
+// TODO: Implement Rayon's ParallelExtend
+// see <https://docs.rs/rayon/1.3.0/rayon/iter/trait.ParallelExtend.html#tymethod.par_extend>
 
 impl<T: Clone> Deref for MmapVec<T> {
     type Target = [T];

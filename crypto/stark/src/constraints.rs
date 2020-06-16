@@ -1,7 +1,7 @@
-use crate::rational_expression::RationalExpression;
+use crate::{polynomial::DensePolynomial, rational_expression::RationalExpression};
 use itertools::Itertools;
 use std::{collections::BTreeSet, fmt, prelude::v1::*};
-use zkp_primefield::FieldElement;
+use zkp_primefield::{FieldElement, Root};
 
 #[derive(Clone, Debug)]
 pub enum Error {
@@ -60,6 +60,13 @@ pub struct Constraints {
     /// After `fri_layout.sum()` reductions are done, the remaining polynomial
     /// is written explicitly in coefficient form.
     pub fri_layout: Vec<usize>,
+
+    /// To make autogeneration easier we have included a 'ClaimPolynomial'
+    /// these claim polynomials need to be taken out of the expressions before
+    /// they can be evaluated
+    /// The following Vec of dense polys can be used to substitute claim
+    /// polynomials inside of the prover.
+    pub claim_polynomials: Vec<DensePolynomial>,
 }
 
 impl Constraints {
@@ -85,13 +92,19 @@ impl Constraints {
         fri_layout
     }
 
+    /// Requires all instances of `RationalExpression::ClaimPolynomial` in the
+    /// expressions to have been replaced by
+    /// `RationalExpression::DensePolynomial`.
+    // False positive
+    // TODO: Remove once [1] clears
+    // [1]: <https://github.com/rust-lang/rust-clippy/issues/5351>
+    #[allow(clippy::unused_self)]
     pub fn from_expressions(
         (trace_nrows, trace_ncolumns): (usize, usize),
         channel_seed: Vec<u8>,
         expressions: Vec<RationalExpression>,
     ) -> Result<Self, Error> {
         let _ = FieldElement::root(trace_nrows).ok_or(Error::InvalidTraceLength)?;
-        // TODO: Validate expressions
         // TODO: Hash expressions into channel seed
         // TODO - Examine if we want to up these security params further.
         // 22.5*4  + 0 queries = 90
@@ -105,6 +118,57 @@ impl Constraints {
             pow_bits: 0,
             num_queries: 45,
             fri_layout: Self::default_fri_layout(trace_nrows),
+            claim_polynomials: vec![],
+        })
+    }
+
+    /// Requires all instances of `RationalExpression::ClaimPolynomial` in the
+    /// expressions to have been replaced by
+    /// `RationalExpression::DensePolynomial`.
+    // False positive
+    // TODO: Remove once [1] clears
+    // [1]: <https://github.com/rust-lang/rust-clippy/issues/5351>
+    #[allow(clippy::unused_self)]
+    pub fn from_expressions_detailed(
+        (trace_nrows, trace_ncolumns): (usize, usize),
+        channel_seed: Vec<u8>,
+        expressions: Vec<RationalExpression>,
+        op_blowup: Option<usize>,
+        op_pow_bits: Option<usize>,
+        op_num_queries: Option<usize>,
+        op_fri_layout: Option<Vec<usize>>,
+    ) -> Result<Self, Error> {
+        let _ = FieldElement::root(trace_nrows).ok_or(Error::InvalidTraceLength)?;
+        // TODO: Hash expressions into channel seed
+        // 15*4 + 30 queries = 90
+        Ok(Self {
+            channel_seed,
+            trace_nrows,
+            trace_ncolumns,
+            expressions,
+            blowup: match op_blowup {
+                Some(x) => x,
+                None => 16,
+            },
+            pow_bits: match op_pow_bits {
+                Some(x) => x,
+                None => {
+                    if cfg!(test) {
+                        0
+                    } else {
+                        20
+                    }
+                }
+            },
+            num_queries: match op_num_queries {
+                Some(x) => x,
+                None => 13,
+            },
+            fri_layout: match op_fri_layout {
+                Some(x) => x,
+                None => Self::default_fri_layout(trace_nrows),
+            },
+            claim_polynomials: vec![],
         })
     }
 
@@ -208,6 +272,28 @@ impl Constraints {
             .fold(BTreeSet::new(), |x, y| &x | &y)
             .into_iter()
             .collect()
+    }
+
+    // This sets a the claim polynomials field
+    // Note that since we didn't want to change the interface this is the
+    // only way to set or change the field
+    pub fn add_claim_polynomials(&mut self, polys: Vec<DensePolynomial>) {
+        self.claim_polynomials = polys;
+    }
+
+    // This function if called on a set of constraints which has both
+    // Rational Expression claim polynomials in the constraints
+    // and has set a claim_polynomials constraint field, will use the
+    // claim_polynomials constraint field to substitute out the
+    // Rational Expression claim polynomials
+    pub fn substitute(&mut self) {
+        if !self.claim_polynomials.is_empty() {
+            self.expressions = self
+                .expressions
+                .iter()
+                .map(|x| x.substitute_claim(&self.claim_polynomials))
+                .collect();
+        }
     }
 }
 

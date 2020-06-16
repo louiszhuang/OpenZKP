@@ -20,18 +20,20 @@ We follow the
 
 * ["Rust style guide"][rustfmt],
 * ["Rust API Guidelines"][rustapi],
-* ["Rust Book"][rustbook], and
+* ["Rust Book"][rustbook],
+* ["Secure Rust Guideline"][sec-rs], and
 * ["Libra Coding Guidelines"][libra].
 
 [rustfmt]: https://github.com/rust-dev-tools/fmt-rfcs/blob/master/guide/guide.md
 [rustapi]: https://rust-lang-nursery.github.io/api-guidelines/about.html
 [rustbook]: https://doc.rust-lang.org/book/title-page.html
+[sec-rs]: https://anssi-fr.github.io/rust-guide/
 [libra]: https://developers.libra.org/docs/community/coding-guidelines
 
 Except,
 
 * Unit tests are in the same file as the code covered and not in separate files.
-* We use `quickcheck` for property based testing.
+* We use `proptest` for property based testing.
 
 In addition to the above, we use [Criterion][criterion] extensively for statistical
 benchmarking. See the section below for what is expected.

@@ -1,14 +1,11 @@
 use crate::polynomial::DensePolynomial;
-use rayon::prelude::*;
+use log::trace;
 use std::{
     ops::{Index, IndexMut},
     prelude::v1::*,
 };
 use zkp_mmap_vec::MmapVec;
-use zkp_primefield::{
-    fft::{ifft_permuted, permute},
-    FieldElement,
-};
+use zkp_primefield::{fft::permute, Fft, FieldElement, Root, Zero};
 
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
@@ -23,7 +20,7 @@ impl TraceTable {
     pub fn new(trace_length: usize, num_columns: usize) -> Self {
         let mut values: MmapVec<FieldElement> = MmapVec::with_capacity(trace_length * num_columns);
         for _ in 0..(trace_length * num_columns) {
-            values.push(FieldElement::ZERO);
+            values.push(FieldElement::zero());
         }
         Self {
             trace_length,
@@ -69,8 +66,8 @@ impl TraceTable {
     }
 
     pub fn interpolate(&self) -> Vec<DensePolynomial> {
-        (0..self.num_columns())
-            .into_par_iter()
+        trace!("BEGIN Interpolate");
+        let result = (0..self.num_columns())
             // OPT: Use and FFT that can transform the entire table in one pass,
             // working on whole rows at a time. That is, it is vectorized over rows.
             // OPT: Use an in-place FFT. We don't need the trace table after this,
@@ -83,11 +80,13 @@ impl TraceTable {
                 }
 
                 // Transform to coefficients
-                ifft_permuted(&mut vec);
+                vec.ifft();
                 permute(&mut vec);
                 DensePolynomial::from_mmap_vec(vec)
             })
-            .collect::<Vec<DensePolynomial>>()
+            .collect::<Vec<DensePolynomial>>();
+        trace!("END Interpolate");
+        result
     }
 }
 

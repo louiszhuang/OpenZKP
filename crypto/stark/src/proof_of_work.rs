@@ -1,13 +1,13 @@
 #[cfg(all(feature = "std", feature = "prover"))]
-use log::info;
+use log::{info, trace};
 #[cfg(all(feature = "std", feature = "prover"))]
 use rayon::prelude::*;
 use std::convert::TryFrom;
 #[cfg(all(feature = "std", feature = "prover"))]
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use tiny_keccak::Keccak;
+use tiny_keccak::{Hasher, Keccak};
 use zkp_macros_decl::hex;
-use zkp_u256::U256;
+use zkp_u256::{Binary, U256};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "std", derive(Debug))]
@@ -33,7 +33,7 @@ impl ChallengeSeed {
 
     pub(crate) fn with_difficulty(self, difficulty: usize) -> Challenge {
         let mut seed = [0_u8; 32];
-        let mut keccak = Keccak::new_keccak256();
+        let mut keccak = Keccak::v256();
         keccak.update(&hex!("0123456789abcded"));
         keccak.update(&self.0);
         keccak.update(&[u8::try_from(difficulty).unwrap()]);
@@ -46,7 +46,7 @@ impl Challenge {
     pub(crate) fn verify(&self, response: Response) -> bool {
         // TODO: return Result<()>
         // OPT: Inline Keccak256 and work directly on buffer using 'keccakf'
-        let mut keccak = Keccak::new_keccak256();
+        let mut keccak = Keccak::v256();
         let mut digest = [0_u8; 32];
         keccak.update(&self.seed);
         keccak.update(&(response.nonce.to_be_bytes()));
@@ -80,6 +80,7 @@ impl Challenge {
             "Solving {} bit proof of work with {} threads.",
             self.difficulty, num_threads
         );
+        trace!("BEGIN Proof of work");
         let first_nonce = AtomicU64::new(u64::max_value());
         (0..num_threads as u64).into_par_iter().for_each(|offset| {
             for nonce in (offset..).step_by(num_threads) {
@@ -91,6 +92,7 @@ impl Challenge {
                 }
             }
         });
+        trace!("END Proof of work");
         Response {
             nonce: first_nonce.into_inner(),
         }
